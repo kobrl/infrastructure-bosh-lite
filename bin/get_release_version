@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+
+unless ARGV.size == 2
+  puts "Usage: ./get_release_version yaml_file release_name" 
+  exit 1
+end
+
+require 'yaml'
+yaml_file ,release_name = *ARGV
+
+
+puts YAML.load_file(yaml_file)["releases"].find{|r| r['name'] == release_name }['version']
+

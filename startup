@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+OLDPWD=PWD
+cd ~/workspace/bosh-lite/
+vagrant up
+./bin/add-route
+cd $OLDPWD
+

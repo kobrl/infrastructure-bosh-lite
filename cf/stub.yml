@@ -1,0 +1,10 @@
+---
+name: cf-warden
+director_uuid: 18bb4e2a-1ab6-49ab-ab7a-ea1e4da3854d
+releases:
+  - name: cf
+    version: 210
+properties:
+  domain: bonzofenix.dev
+  loggregator_endpoint:
+    shared_secret: PLACEHOLDER-LOGGREGATOR-SECRET

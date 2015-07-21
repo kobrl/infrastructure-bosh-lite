@@ -1,0 +1,13 @@
+---
+meta:
+  environment: nfs
+  dns_root: boshlite
+  release:
+    name: nfs
+    version: latest
+
+director_uuid: 18bb4e2a-1ab6-49ab-ab7a-ea1e4da3854d
+
+releases:
+  - name: nfs
+    version: latest

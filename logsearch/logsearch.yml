@@ -1,0 +1,403 @@
+---
+name: logsearch
+director_uuid: 18bb4e2a-1ab6-49ab-ab7a-ea1e4da3854d
+releases:
+- name: logsearch
+  version: 19
+- name: logsearch-for-cloudfoundry
+  version: 2
+compilation:
+  workers: 2
+  network: default
+  reuse_compilation_vms: true
+  cloud_properties: {}
+update:
+  serial: true
+  canaries: 1
+  canary_watch_time: 30000
+  update_watch_time: 30000
+  max_in_flight: 1
+  max_errors: 1
+resource_pools:
+- name: warden
+  network: default
+  size: 7
+  stemcell:
+    name: bosh-warden-boshlite-ubuntu-trusty-go_agent
+    version: 389
+  cloud_properties: {}
+jobs:
+- name: api
+  release: logsearch
+  templates:
+  - name: elasticsearch
+  - name: api
+  - name: kibana
+  update:
+    serial: true
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    static_ips:
+    - 10.244.2.2
+  properties:
+    elasticsearch:
+      node:
+        allow_data: false
+- name: elasticsearch_persistent
+  release: logsearch
+  templates:
+  - name: elasticsearch
+  update:
+    serial: true
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    static_ips:
+    - 10.244.2.6
+  persistent_disk: 1024
+  properties:
+    elasticsearch:
+      node:
+        allow_master: false
+- name: queue
+  release: logsearch
+  templates:
+  - name: queue
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    static_ips:
+    - 10.244.2.10
+- name: ingestor
+  release: logsearch
+  templates:
+  - name: ingestor_lumberjack
+  - name: ingestor_syslog
+  - name: ingestor_relp
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    static_ips:
+    - 10.244.2.14
+- name: log_parser
+  release: logsearch
+  templates:
+  - name: log_parser
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    default:
+    - dns
+    - gateway
+- name: elasticsearch_autoscale
+  release: logsearch
+  templates:
+  - name: elasticsearch
+  update:
+    serial: true
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    default:
+    - dns
+    - gateway
+  properties:
+    elasticsearch:
+      node:
+        allow_master: false
+- name: ingestor_cloudfoundry
+  release: logsearch-for-cloudfoundry
+  templates:
+  - name: ingestor_cloudfoundry-firehose
+  instances: 1
+  resource_pool: warden
+  networks:
+  - name: default
+    default:
+    - dns
+    - gateway
+  persistent_disk: 1024
+properties:
+  api:
+    port: 80
+  kibana:
+    elasticsearch: 10.244.2.2:9200
+    port: 5601
+  elasticsearch:
+    host: 10.244.2.2
+    cluster_name: logsearch-bosh-lite
+    drain: true
+    indices:
+      ttl_interval: 5m
+    exec:
+      environment:
+        ES_HEAP_SIZE: 256M
+  redis:
+    host: 10.244.2.10
+  logstash_parser:
+    debug: true
+    filters: "#\n    # Default type to _logstash_input \n    #\n\n    alter {\n        coalesce
+      => [\n            \"type\", \"%{_logstash_input}\", \"%{_type}\"\n        ]\n
+      \   }\n\n    #\n    # rewrite our defined globals\n    #\n\n    if [type] ==
+      'redis' or [type] == 'redis-input' {\n        mutate {\n            remove_field
+      => [ 'type' ]\n        }\n    }\n\n    if [type] != '' {\n        mutate {\n
+      \           rename => [ \"type\", \"@type\" ]\n        }\n    }\n\n    if [message]
+      != '' {\n        mutate {\n            rename => [ \"message\", \"@message\"
+      ]\n        }\n    } else if [message] == '' and [@message] !~ /^.+$/ {\n        drop
+      { }\n    }\n\n    #\n    # ignore particularly useless lines\n    #\n\n    if
+      [@message] =~ /^\\s*$/ or [@message] =~ /^#.*$/ {\n        drop { }\n    }\n\n
+      \   #\n    # trim excessively long messages\n    #\n\n    ruby {\n        code
+      => \"(event['@message'] = event['@message'][0,1048576] and (event['tags'] ||=
+      []) << '_groktrimmed') if event['@message'] and event['@message'].length > 1048576\"\n
+      \   }\n\n    #\n    # trim excess whitespace\n    #\n\n    mutate {\n        strip
+      => [ \"@message\" ]\n    }\n\n    #\n    # Additional filter types from deployment
+      manifest\n    #\nif [@type] in [\"syslog\", \"relp\"] {\n  # syslog/relp\n  \n
+      \ grok {\n      match => { \"@message\" => \"(?:%{INT:syslog6587_msglen} )?<%{POSINT:syslog_pri}>(?:%{NONNEGINT:syslog5424_ver}
+      )?(?:%{SYSLOGTIMESTAMP:syslog_timestamp}|%{TIMESTAMP_ISO8601:syslog_timestamp})
+      %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\\[%{POSINT:syslog_pid}\\])?(:)?
+      %{GREEDYDATA:syslog_message}\" }\n      add_field => [ \"received_at\", \"%{@timestamp}\"
+      ]\n      add_field => [ \"received_from\", \"%{host}\" ]\n      add_tag => [
+      \"syslog_standard\" ]\n      tag_on_failure => [\"_grokparsefailure-syslog_standard\"]\n
+      \ }\n  \n  if !(\"_grokparsefailure-syslog_standard\" in [tags]) {\n      syslog_pri
+      { }\n  \n      date {\n          match => [ \"syslog_timestamp\", \"MMM  d HH:mm:ss\",
+      \"MMM dd HH:mm:ss\", \"ISO8601\" ]\n          timezone => \"UTC\"\n      }\n
+      \ \n      # hostname: handle syslog configurations where hostname is localhost\n
+      \     if ([syslog_hostname] == \"localhost\" ) {\n          grok {\n              match
+      => { \"received_from\" => \"%{IPORHOST:syslog_hostname}(?::%{POSINT:syslog_port})?\"
+      }\n              overwrite => [ \"syslog_hostname\", \"syslog_port\" ]\n              tag_on_failure
+      => [ \"_grokparsefailure-syslog_standard-hostname\"]\n          }\n      }\n
+      \ \n      mutate {\n          replace => [ \"@source.host\", \"%{syslog_hostname}\"
+      ]\n      }\n  \n      mutate {\n          convert => [ \"syslog5424_ver\", \"integer\"
+      ]\n          convert => [ \"syslog6587_msglen\", \"integer\" ]\n          remove_field
+      => [\n              #\"syslog_pri\",\n              \"syslog_hostname\",\n              \"syslog_port\",\n
+      \             \"syslog_timestamp\"\n          ]\n      }\n  \n      if [syslog5424_ver]
+      == 1 {\n          grok {\n              # I don't think this is rfc5424-legal
+      because it says SD *must* exist and message *may* exist.\n              # However,
+      this makes parsing compatible with common syslog implementations.\n              match
+      => [ \"syslog_message\", \"(?:%{DATA:syslog_procid}|\\-) (?:%{DATA:syslog_msgid}|\\-)(?:
+      %{SYSLOG5424SD:syslog_sd}| \\-)? %{GREEDYDATA:syslog_message}\" ]\n              overwrite
+      => [\n                  \"syslog_message\"\n              ]\n              tag_on_failure
+      => [ \"_grokparsefailure-syslog_standard-5424\" ]\n          }\n  \n          #
+      structured-data\n          if [syslog_sd] {\n              grok {\n                  match
+      => [ \"syslog_sd\", \"\\[%{DATA:syslog_sd_id} (?<syslog_sd_params_raw]>[^\\]]+)\\]\"
+      ]\n                  remove_field => [\n                      \"syslog_sd\"\n
+      \                 ]\n                  tag_on_failure => [ \"_grokparsefailure-syslog_standard-5424/sds\"
+      ]\n              }\n  \n              if !(\"_grokparsefailure-syslog_standard-5424/sd\"
+      in [tags]) {\n                  # convert the the key-value pairs\n                  kv
+      {\n                      source => \"syslog_sd_params_raw\"\n                      target
+      => \"syslog_sd_params\"\n                      remove_field => [\n                          \"syslog_sd_params_raw\"\n
+      \                     ]\n                  }\n  \n                  if [syslog_sd_params][type]
+      {\n                      # establish a convention that a structured data key
+      of \"type\" will be the log type\n                      mutate {\n                          replace
+      => { \"@type\" => \"%{syslog_sd_params[type]}\" }\n                          remove_field
+      => [ \"syslog_sd_params[type]\" ]\n                      }\n                  }\n
+      \             }\n          }\n      }\n  }\n\n  if \"NXLOG@14506\" == [syslog_sd_id]
+      {\n      # We're going to treat syslog as a transparent transport and pretend
+      it was never even\n      # utilized. This means we'll drop the syslog metadata,
+      but it really shouldn't matter.\n  \n      mutate {\n          # This is a workaround
+      to an apparent bug where logstash treats a non-existant field\n          # as
+      an array which causes a \"Not possible to merge an array and a hash\" error.
+      Here\n          # we force the probably non-existant field to a hash with a
+      temp field so we can use\n          # the mutate's merge option.\n          add_field
+      => [ \"@source[_forcemeahash]\", \"workaround\" ]\n      }\n  \n      mutate
+      {\n          merge => [ \"@source\", \"syslog_sd_params\" ]\n          rename
+      => [ \"syslog_message\", \"@message\" ]\n          remove_field => [ \"@source[_forcemeahash]\"
+      ]\n      }\n  \n      mutate {\n          # syslog is just the transport; no
+      need to store\n          remove_field => \"syslog_message\"\n          remove_field
+      => \"syslog_pri\"\n          remove_field => \"syslog5424_ver\"\n          remove_field
+      => \"syslog_program\"\n          remove_field => \"syslog_severity_code\"\n
+      \         remove_field => \"syslog_facility_code\"\n          remove_field =>
+      \"syslog_facility\"\n          remove_field => \"syslog_severity\"\n          remove_field
+      => \"syslog_sd_id\"\n          remove_field => \"syslog_sd_params\"\n  \n          #
+      syslog host is actually the shipper\n          rename => [ \"@source.host\",
+      \"@shipper[host]\" ]\n  \n          # these are parsed with kv, but they're
+      static nxlog shipper properties\n          rename => [ \"@source[EventReceivedTime]\",
+      \"@shipper[event_received_time]\" ]\n          rename => [ \"@source[SourceModuleName]\",
+      \"@shipper[module_name]\" ]\n          rename => [ \"@source[SourceModuleType]\",
+      \"@shipper[module_type]\" ]\n      }\n  }\n\n}\n"
+  logstash_ingestor:
+    debug: true
+    relp:
+      port: 5515
+    syslog:
+      port: 5514
+    syslog_tls:
+      port: 443
+      ssl_cert: |
+        -----BEGIN CERTIFICATE-----
+        MIICWjCCAcOgAwIBAgIJAN57Q1O2B6k0MA0GCSqGSIb3DQEBBQUAMG0xFTATBgNV
+        BAoMDGxvZ3NlYXJjaC5pbzEeMBwGA1UECwwVQ2VydGlmaWNhdGUgQXV0aG9yaXR5
+        MREwDwYDVQQDDAhpbmdlc3RvcjEhMB8GCSqGSIb3DQEJARYSbm9ib2R5QGV4YW1w
+        bGUuY29tMB4XDTE0MTIxNzIyMDkyNloXDTI0MTIxNDIyMDkyNlowXDEVMBMGA1UE
+        CgwMbG9nc2VhcmNoLmlvMQ0wCwYDVQQLDARURVNUMREwDwYDVQQDDAhpbmdlc3Rv
+        cjEhMB8GCSqGSIb3DQEJARYSbm9ib2R5QGV4YW1wbGUuY29tMIGfMA0GCSqGSIb3
+        DQEBAQUAA4GNADCBiQKBgQClKtJSXPwsPWPIhSFqPDcyQwvsIY/nF+vNjetX1xjC
+        ATC6F6ZaKCcddF1JaomTiPR9+qVeNedGwvtcrCLyOYpqBWs6KuCq4dE/7QxEwova
+        yLEQRGMvZW8OClpjY0PdrpX+ekqllD/7CTMYvabc3Kq0Q6WPZAGLo01YoW2KKr13
+        GQIDAQABoxMwETAPBgNVHREECDAGhwQK9AIOMA0GCSqGSIb3DQEBBQUAA4GBAFLV
+        Z59nPFO1+W407lDCm4tXV3RpUCt4drAqNp1xum6U9fkcgzU0ZhrfmVCqGdFGWxxM
+        Jhe1iAbho/Jb85V9hB9txr2Uh5Xvr0r0faeJYqFF+NCc9G+PKiNVwbId0rH2bfwr
+        YLxYAgzDDozZ1bUSUQKbkiX8jSQHB63MPZXSAMWb
+        -----END CERTIFICATE-----
+      ssl_key: |
+        -----BEGIN RSA PRIVATE KEY-----
+        MIICXAIBAAKBgQClKtJSXPwsPWPIhSFqPDcyQwvsIY/nF+vNjetX1xjCATC6F6Za
+        KCcddF1JaomTiPR9+qVeNedGwvtcrCLyOYpqBWs6KuCq4dE/7QxEwovayLEQRGMv
+        ZW8OClpjY0PdrpX+ekqllD/7CTMYvabc3Kq0Q6WPZAGLo01YoW2KKr13GQIDAQAB
+        AoGAHX57Flgic+f2hJ05bVYZaTFN1Lndj5/W7Nr19rajZil+QQzuGNVovrrD2dNb
+        g+wF9OUoWJ15kkpJRrA6gVTDIYgZwoWjpo1X6NKfiMGbtITSePfwB17egeaVvoKW
+        nxfhd5absxOAC13hXNGEIyklzBMzyikTbrlemeo07gLq+H0CQQDWzxVTIXesjQ2S
+        Um9vvsUdlxqU5AjvsVPDZP3/d3NYF0ZALyyeqg1mE+pc4gEXw3T5Q5IMyxxFZjqQ
+        m2mpuZzDAkEAxNbXko2mSopYZ5/LR6KJFvze8t70b0TUvlvPvM3M6pMeViqSrfyt
+        QvHMNPRxbgoniNwm7W9x6Jp2UAUzH2kO8wJBAJc3KkTeH3fpx+8EdwwMGIkPERhV
+        OvE5PMUlOCT5usn9gGe4jcmX3lzIkkgWlTxcTOEYLx0wclNsdrfLn+NqFa8CQByU
+        xYB2KOsx41xIi4+/PgCkfwrs7LkrWWi6lBNqHpMBAaqpS9sPkWjjCy+1PrMnrk3l
+        CZH4WKXZp8w+tQmei5kCQCxQ6Se1d1fSYQlLsCoTKmbcOjFoT5joj1nMIwSwn/Sy
+        eevXlJLkedUMlEntH3b+dQjaRSWwWWtjzxY/Ou0CLKI=
+        -----END RSA PRIVATE KEY-----
+    lumberjack:
+      ssl_certificate: |
+        -----BEGIN CERTIFICATE-----
+        MIICWjCCAcOgAwIBAgIJAN57Q1O2B6k0MA0GCSqGSIb3DQEBBQUAMG0xFTATBgNV
+        BAoMDGxvZ3NlYXJjaC5pbzEeMBwGA1UECwwVQ2VydGlmaWNhdGUgQXV0aG9yaXR5
+        MREwDwYDVQQDDAhpbmdlc3RvcjEhMB8GCSqGSIb3DQEJARYSbm9ib2R5QGV4YW1w
+        bGUuY29tMB4XDTE0MTIxNzIyMDkyNloXDTI0MTIxNDIyMDkyNlowXDEVMBMGA1UE
+        CgwMbG9nc2VhcmNoLmlvMQ0wCwYDVQQLDARURVNUMREwDwYDVQQDDAhpbmdlc3Rv
+        cjEhMB8GCSqGSIb3DQEJARYSbm9ib2R5QGV4YW1wbGUuY29tMIGfMA0GCSqGSIb3
+        DQEBAQUAA4GNADCBiQKBgQClKtJSXPwsPWPIhSFqPDcyQwvsIY/nF+vNjetX1xjC
+        ATC6F6ZaKCcddF1JaomTiPR9+qVeNedGwvtcrCLyOYpqBWs6KuCq4dE/7QxEwova
+        yLEQRGMvZW8OClpjY0PdrpX+ekqllD/7CTMYvabc3Kq0Q6WPZAGLo01YoW2KKr13
+        GQIDAQABoxMwETAPBgNVHREECDAGhwQK9AIOMA0GCSqGSIb3DQEBBQUAA4GBAFLV
+        Z59nPFO1+W407lDCm4tXV3RpUCt4drAqNp1xum6U9fkcgzU0ZhrfmVCqGdFGWxxM
+        Jhe1iAbho/Jb85V9hB9txr2Uh5Xvr0r0faeJYqFF+NCc9G+PKiNVwbId0rH2bfwr
+        YLxYAgzDDozZ1bUSUQKbkiX8jSQHB63MPZXSAMWb
+        -----END CERTIFICATE-----
+      ssl_key: |
+        -----BEGIN RSA PRIVATE KEY-----
+        MIICXAIBAAKBgQClKtJSXPwsPWPIhSFqPDcyQwvsIY/nF+vNjetX1xjCATC6F6Za
+        KCcddF1JaomTiPR9+qVeNedGwvtcrCLyOYpqBWs6KuCq4dE/7QxEwovayLEQRGMv
+        ZW8OClpjY0PdrpX+ekqllD/7CTMYvabc3Kq0Q6WPZAGLo01YoW2KKr13GQIDAQAB
+        AoGAHX57Flgic+f2hJ05bVYZaTFN1Lndj5/W7Nr19rajZil+QQzuGNVovrrD2dNb
+        g+wF9OUoWJ15kkpJRrA6gVTDIYgZwoWjpo1X6NKfiMGbtITSePfwB17egeaVvoKW
+        nxfhd5absxOAC13hXNGEIyklzBMzyikTbrlemeo07gLq+H0CQQDWzxVTIXesjQ2S
+        Um9vvsUdlxqU5AjvsVPDZP3/d3NYF0ZALyyeqg1mE+pc4gEXw3T5Q5IMyxxFZjqQ
+        m2mpuZzDAkEAxNbXko2mSopYZ5/LR6KJFvze8t70b0TUvlvPvM3M6pMeViqSrfyt
+        QvHMNPRxbgoniNwm7W9x6Jp2UAUzH2kO8wJBAJc3KkTeH3fpx+8EdwwMGIkPERhV
+        OvE5PMUlOCT5usn9gGe4jcmX3lzIkkgWlTxcTOEYLx0wclNsdrfLn+NqFa8CQByU
+        xYB2KOsx41xIi4+/PgCkfwrs7LkrWWi6lBNqHpMBAaqpS9sPkWjjCy+1PrMnrk3l
+        CZH4WKXZp8w+tQmei5kCQCxQ6Se1d1fSYQlLsCoTKmbcOjFoT5joj1nMIwSwn/Sy
+        eevXlJLkedUMlEntH3b+dQjaRSWwWWtjzxY/Ou0CLKI=
+        -----END RSA PRIVATE KEY-----
+  ingestor_cloudfoundry-firehose:
+    uaa-endpoint: https://uaa.bonzofenix.dev/oauth/authorize
+    doppler-endpoint: wss://doppler.bonzofenix.dev
+    skip-ssl-validation: true
+    firehose-user: admin
+    firehose-password: admin
+    syslog-server: 10.244.10.6:514
+    cf-domain: bonzofenix.dev
+networks:
+- name: default
+  subnets:
+  - cloud_properties:
+      name: random
+    range: 10.244.2.0/30
+    reserved:
+    - 10.244.2.1
+    static:
+    - 10.244.2.2
+  - cloud_properties:
+      name: random
+    range: 10.244.2.4/30
+    reserved:
+    - 10.244.2.5
+    static:
+    - 10.244.2.6
+  - cloud_properties:
+      name: random
+    range: 10.244.2.8/30
+    reserved:
+    - 10.244.2.9
+    static:
+    - 10.244.2.10
+  - cloud_properties:
+      name: random
+    range: 10.244.2.12/30
+    reserved:
+    - 10.244.2.13
+    static:
+    - 10.244.2.14
+  - cloud_properties:
+      name: random
+    range: 10.244.2.16/30
+    reserved:
+    - 10.244.2.17
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.20/30
+    reserved:
+    - 10.244.2.21
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.24/30
+    reserved:
+    - 10.244.2.25
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.28/30
+    reserved:
+    - 10.244.2.29
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.32/30
+    reserved:
+    - 10.244.2.33
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.36/30
+    reserved:
+    - 10.244.2.37
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.40/30
+    reserved:
+    - 10.244.2.41
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.44/30
+    reserved:
+    - 10.244.2.45
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.48/30
+    reserved:
+    - 10.244.2.49
+    static: []
+  - cloud_properties:
+      name: random
+    range: 10.244.2.52/30
+    reserved:
+    - 10.244.2.53
+    static: []
+apply_spec:
+  properties:
+    ntp:
+    - 0.europe.pool.ntp.org
+    - 1.europe.pool.ntp.org
+    - 2.europe.pool.ntp.org
+    - 3.europe.pool.ntp.org

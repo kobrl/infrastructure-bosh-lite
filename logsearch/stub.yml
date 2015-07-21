@@ -1,0 +1,30 @@
+---
+meta:
+  environment: logsearch
+releases:
+- name: logsearch
+  version: 21
+- name: elasticsearch-plugins
+  version: 1
+
+jobs:
+- name: api
+  templates:
+  - name: elasticsearch-plugins
+    release: elasticsearch-plugins
+  - name: elasticsearch
+    release: logsearch
+  - name: api
+    release: logsearch
+  - name: kibana
+    release: logsearch
+  properties:
+    elasticsearch:
+      plugins:
+      - hq: file:///var/vcap/packages/elasticsearch-plugins/elasticsearch-hq.zip
+      - kopf: file:///var/vcap/packages/elasticsearch-plugins/elasticsearch-kopf.zip
+
+director_uuid: 18bb4e2a-1ab6-49ab-ab7a-ea1e4da3854d
+name: logsearch
+
+
